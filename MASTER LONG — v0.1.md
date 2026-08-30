@@ -58,3 +58,5 @@ Structural invalidation
 
 ⑫ TP
 Opposing liquidity
+
+**Short = mirrored logic.**
