@@ -1,3 +1,5 @@
+MASTER LONG — v0.1
+
 ① 1W
 Macro regime supportive
 
