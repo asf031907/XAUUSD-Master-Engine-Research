@@ -1,7 +1,6 @@
 ### MASTER LONG — v0.1
 
-```text
-⊕ 1W
+<pre><code>⊕ 1W
 Macro regime supportive
 
         ↓
@@ -58,6 +57,6 @@ Structural invalidation
         ↓
 
 ⊕ TP
-Opposing liquidity
+Opposing liquidity</code></pre>
 
-###Short = mirrored logic.
+**Short = mirrored logic.**
