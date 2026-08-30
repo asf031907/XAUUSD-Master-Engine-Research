@@ -1,62 +1,63 @@
-MASTER LONG — v0.1
+### MASTER LONG — v0.1
 
-① 1W
+```text
+⊕ 1W
 Macro regime supportive
 
         ↓
 
-② 1D
+⊕ 1D
 Directional bias bullish / transition-to-bullish
 
         ↓
 
-③ 4H
+⊕ 4H
 Price reaches meaningful location
 
         ↓
 
-④ Liquidity
+⊕ Liquidity
 Sell-side liquidity becomes relevant
 
         ↓
 
-⑤ Event
+⊕ Event
 Liquidity sweep / CRT-type manipulation
 
         ↓
 
-⑥ 1H
+⊕ 1H
 Displacement + CISD confirmation
 
         ↓
 
-⑦ SMT
+⊕ SMT
 Bullish SMT present?
 → Quality boost
 
         ↓
 
-⑧ POI
+⊕ POI
 IFVG / Breaker / FVG candidate
 
         ↓
 
-⑨ 30M
+⊕ 30M
 Refinement confirmation
 
         ↓
 
-⑩ ENTRY
+⊕ ENTRY
 LONG
 
         ↓
 
-⑪ SL
+⊕ SL
 Structural invalidation
 
         ↓
 
-⑫ TP
+⊕ TP
 Opposing liquidity
 
-**Short = mirrored logic.**
+Short = mirrored logic.
