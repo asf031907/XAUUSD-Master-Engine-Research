@@ -1,0 +1,561 @@
+//@version=6
+// =============================================================================
+// XAUUSD MASTER ENGINE — v0.1 (MILESTONE 1+2 SKELETON)
+// =============================================================================
+// STATUS: IN-PROGRESS SKELETON. NOT A COMPLETE TRADING ENGINE.
+// This file contains ONLY:
+//   MILESTONE 1 — Pine v6 namespacing & source compatibility layer
+//   MILESTONE 2 — Canonical Master Engine data types
+//
+// Detection logic (Liquidity/Sweep adapters, CRT, CISD, MSS, Context,
+// Displacement, POI, SMT, Regime, Execution, Signal Engine, Genealogy,
+// Debug, Alerts, Backtest) is INTENTIONALLY NOT YET WIRED. It arrives in
+// Milestones 3-16 per the locked Implementation Order. Wiring it in early
+// would violate the "no uncontrolled giant pass" development rule.
+//
+// SOURCE ATTRIBUTION (preserved per spec §39 / Architecture Spec §B.2):
+//   crt_*   <- "CRT Pro+ by Artas"                (CRT Pro+.pine)
+//   cisd_*  <- "CISD PRO+"                         (CISD pro+.pine)
+//   ifvg_*  <- "IFVG " (IFVG Pro+)                 (IFVG_pro_.pine)
+//   uni_*   <- "Unicorn Model pro"                 (unicornmodel.pine)
+//              Mozilla Public License 2.0 — Copyright (c) 2026 fxraptor-alpha
+//   ts_*    <- "ICT Turtle Soup Model"             (ICT_Turtle_Soup_Model.pine)
+//   me_*    <- Master Engine synthesis (no source; see XAUUSD_MASTER_ENGINE.md)
+//   liq_*   <- Master Engine canonical wrapper (synthesis)
+//
+// NAMESPACING RULE (Architecture Spec §B, Correction #1 from approval):
+//   Renaming types/functions to avoid Pine v6 collisions is a MECHANICAL
+//   change only. No algorithmic/semantic behavior has been altered in this
+//   milestone. Internal field names, function bodies, and thresholds are
+//   preserved verbatim from source wherever they appear below.
+// =============================================================================
+
+indicator(
+     "XAUUSD Master Engine [DEV — M1+M2 Skeleton]",
+     shorttitle    = "XAU-ME-DEV",
+     overlay       = true,
+     max_bars_back = 5000,     // Architecture Spec §F.3 — single script-wide value
+     max_lines_count   = 500,  // Architecture Spec §F.1 — shared ceiling, all modules
+     max_boxes_count   = 500,
+     max_labels_count  = 500,
+     max_polylines_count = 100)
+
+// =============================================================================
+// PART 0 — MASTER ENGINE GLOBAL CONSTANTS (Master synthesis)
+// =============================================================================
+// Fixed HTF hierarchy per spec: 1W -> 1D -> 4H -> 1H -> 30M (primary execution).
+// These are NOT the source files' own auto-timeframe systems (CRT autoHTF,
+// Unicorn getAutoHTFs, CISD getHTFPeriod, IFVG autoHTF, Turtle Soup
+// f_fractalTF) — those are superseded per Correction #2 (request.security
+// optimization pass) and are NOT ported into this build. This removal is a
+// deliberate Master Engine architectural decision, documented here.
+
+me_TF_1W  = "1W"
+me_TF_1D  = "1D"
+me_TF_4H  = "240"
+me_TF_1H  = "60"
+me_TF_30M = "30"
+
+me_SMT_PAIR = "XAGUSD"   // fixed per spec — CRT's dynamic getSMTPair() ticker-matching
+                          // apparatus is NOT ported (Source Audit, Technical Risk #8).
+                          // This is a documented Master Engine modification: CRT's
+                          // generic-market SMT pairing is replaced with the fixed
+                          // XAUUSD<->XAGUSD pair mandated by the spec.
+
+// =============================================================================
+// PART 1 — MASTER ENGINE CANONICAL DATA TYPES  (Architecture Spec §B.1)
+// =============================================================================
+// Pure Master Engine synthesis. No source equivalent. These are the shared
+// interchange objects that every namespaced source engine will populate via
+// adapter functions in later milestones (Milestone 3 onward).
+
+type me_LiquidityObject
+    string source            // "CRT_HTF" | "UNICORN_A" | "UNICORN_B" | "UNICORN_C" | "UNICORN_D" | "IFVG_HTF" | "TURTLESOUP_PIVOT"
+    string liqType           // "BSL" | "SSL" | "INTERNAL" | "EXTERNAL" | "MAJOR" | "MINOR"
+    string tf                // resolved timeframe string
+    float  price
+    int    createdBar
+    string status            // "CREATED" | "ACTIVE" | "SWEPT" | "CONSUMED" | "INVALIDATED" | "EXPIRED"
+    int    sweptBar
+    bool   isMasterPrimary   // true only for CRT-oriented 4H liquidity (Locked Decision #1)
+
+type me_SweepEvent
+    string source            // "CRT" (Master primary) | "UNICORN" | "IFVG" | "TURTLESOUP" (diagnostic only)
+    string direction         // "BULLISH_SWEEP" | "BEARISH_SWEEP" | "NO_SWEEP"
+    string tf
+    int    barIndex
+    float  sweepExtreme
+    float  sweptLevel
+    bool   isMasterPrimary
+
+type me_StructureEvent
+    string kind               // "CISD_BULL" | "CISD_BEAR" | "MSS_BULL" | "MSS_BEAR" | "NONE"
+    string sourceEngine       // "cisd_Engine" | "ts_MSS"
+    int    barIndex
+    float  level
+    bool   normalizedToStructureConfirmed
+
+type me_DisplacementEvent
+    string state              // "NONE" | "WEAK" | "VALID" | "STRONG"
+    float  measuredValue
+    float  thresholdUsed
+    int    barIndex
+
+type me_SMTSubSignal
+    string kind                // "HTF_DIVERGENCE" | "PIVOT_DIVERGENCE"
+    string state               // "BULLISH" | "BEARISH" | "NONE"
+    int    barIndex
+    string pair                // fixed: "XAGUSD"
+
+type me_SMTAggregate
+    string state                // "BULLISH_SMT" | "BEARISH_SMT" | "NEUTRAL" | "CONTRADICTORY"
+    me_SMTSubSignal htfSignal
+    me_SMTSubSignal pivotSignal
+
+type me_ContextState
+    string tf                  // "1W" | "1D"
+    string state                // "BULLISH" | "BEARISH" | "NEUTRAL" | "TRANSITION"
+    string basis                 // human-readable structural justification (HH/HL, LH/LL etc.)
+
+type me_SetupGenealogy          // spec §29 — mandatory traceability record (populated Milestone 13)
+    string id
+    string direction             // "LONG" | "SHORT"
+    me_ContextState ctx1W
+    me_ContextState ctx1D
+    me_LiquidityObject liq4H
+    me_SweepEvent sweep4H
+    string crtModelUsed           // "MODEL_1_OB" | "MODEL_2_RECLAIM" | "BOTH"
+    string reclaimState           // "WAIT_RECLAIM" | "RECLAIM_CONFIRMED" | "RECLAIM_FAILED"
+    me_StructureEvent structure1H
+    me_DisplacementEvent displacement
+    string poiType                 // "FVG" | "IFVG" | "UNICORN"
+    string poiRef
+    me_SMTAggregate smt
+    bool   regimePermits
+    string execution30M             // "PENDING" | "CONFIRMED"
+    string finalState               // "WAIT" | "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "LONG_ENTRY" | "SHORT_ENTRY" | "INVALIDATED" | "EXPIRED"
+    float  entry
+    float  sl
+    float  tp
+
+// =============================================================================
+// PART 2 — NAMESPACED SOURCE TYPES (Architecture Spec §B.2)
+// =============================================================================
+// Field lists are copied verbatim from source. Only the TYPE NAME is renamed
+// to its namespaced form to avoid Pine v6 identifier collisions on merge.
+// -----------------------------------------------------------------------------
+
+// ---- crt_* (source: CRT Pro+ by Artas) -------------------------------------
+type crt_Candle
+    float           o
+    float           c
+    float           h
+    float           l
+    int             o_idx
+    box             body
+    line            wick_up
+    line            wick_down
+    label           sweepLbl
+
+type crt_CandleSettings
+    bool            show
+    string          htf
+    int             max_display
+
+type crt_Settings
+    color           bull_body
+    color           bull_border
+    color           bull_wick
+    color           bear_body
+    color           bear_border
+    color           bear_wick
+    int             offset
+    int             buffer
+    int             width
+
+type crt_CandleSet
+    crt_Candle[]    candles
+    crt_CandleSettings settings
+    label           tfLabel
+    line[]          sweepLines
+
+type crt_SMT
+    string smtType
+    string smtPair
+    float prevChartHigh
+    float currChartHigh
+    int prevChartHighTime
+    int currChartHighTime
+    float prevChartLow
+    float currChartLow
+    int prevChartLowTime
+    int currChartLowTime
+    bool confirmed
+    int creationBar
+    line smtLine
+    label smtLabel
+
+type crt_Model
+    box             rangeBox
+    line            separatorLine
+    line            sweepLine
+    label           sweepLabel
+    line            targetLine
+    label           targetLabel
+    line            cisdLine
+    label           cisdLabel
+    label           c1Label
+    label           c2Label
+    label           c3Label
+    string          bias         = "Neutral"
+    string          status       = "Formation"
+    float           h            = na
+    float           l            = na
+    float           o            = na
+    float           c            = na
+    int             startBar     = na
+    int             endBar       = na
+    int             h_bar        = na
+    int             l_bar        = na
+    float           h_bar_open   = na
+    float           l_bar_open   = na
+    float           manipOpen    = na   // CRT's internal "CISD" level — routes to
+                                         // crt_Reclaim / Master CRT Engine ONLY.
+                                         // This is NOT the Master CISD Engine
+                                         // (Locked Decision #3 / Architecture §C.3).
+    int             manipBar     = na
+    bool            sweptHigh    = false
+    bool            sweptLow     = false
+    bool            dpurge       = false
+    bool            cisdDone     = false  // field name preserved verbatim from
+                                            // source; semantically this is CRT's
+                                            // own reclaim-confirmation flag, not
+                                            // the Master CISD Engine's output.
+    int             cisdBar      = na
+    float           cisdLevel    = na
+
+// ---- cisd_* (source: CISD PRO+) — AUTHORITATIVE MASTER CISD ENGINE SOURCE --
+type cisd_FVG
+    box fvgBox
+    line midline
+    label fvgLabel
+    float top
+    float bottom
+    bool isBullish
+    int startTime
+    bool mitigated
+    int mitigationTime
+
+type cisd_Setup
+    line cisdLine
+    label baseDot
+    label levelLabel
+    array<label> projection_labels
+    float basePrice
+    bool bullish
+
+type cisd_kz
+    string _title
+    array<box> _box
+    array<line> _hi_line
+    array<line> _lo_line
+    array<label> _hi_label
+    array<label> _lo_label
+    array<bool> _hi_valid
+    array<bool> _lo_valid
+    float prevHigh = na
+    float prevLow = na
+    bool prevHighActive = false
+    bool prevLowActive = false
+
+type cisd_kz_helper
+    cisd_kz _kz
+    string session
+    string tz
+    color c
+    string hi_txt
+    string lo_txt
+
+// ---- ifvg_* (source: IFVG Pro+ / "IFVG ") -----------------------------------
+type ifvg_SwingFVG
+    int    fvgBar1
+    int    fvgBar3
+    float  fvgTop
+    float  fvgBottom
+    int    swingBar
+    float  swingPrice
+    box    fvgBox
+    bool   ifvgConfirmed = false
+    bool   swept = false
+
+type ifvg_Trade
+    bool   bullish
+    box    fvgBox
+    line   entryLine
+    label  entryLabel
+    int    entryBar
+    float  entryPrice
+    line   slLine
+    label  slLabel
+    float  slPrice
+    line   beLine
+    label  beLabel
+    float  bePrice
+    array<line>  rrLines  = na
+    array<label> rrLabels = na
+    bool   resolved = false
+
+type ifvg_SwingPoint
+    float y
+    int   t
+
+type ifvg_SwingSet
+    ifvg_SwingPoint[] points
+
+// ---- uni_* (source: Unicorn Model pro) -------------------------------------
+// MPL 2.0 — Copyright (c) 2026 fxraptor-alpha — attribution preserved per
+// license and per spec §39.
+type uni_HTFLevel
+    string tfLabel
+    string levelType
+    bool isHigh
+    float price
+    int startBar
+    bool isSwept
+    int sweepBar
+    string labelText
+
+type uni_Setup
+    string dir
+    int sweepIndex
+    float sweepExtreme
+    float sweptLevel
+    int sweptLevelStartBar
+    int breakerStartIdx
+    int breakerEndIdx
+    float breakerTop
+    float breakerBottom
+    bool isConfirmed
+    int confIndex
+    float entryPrice
+    float invalidationPrice
+    bool isInvalidated
+    bool isTargetHit
+    line levelLine
+    label levelLabel
+    box breakerBox
+    box fvgBox
+    line[] targetLines
+    label[] targetLabels
+    label setupLabel
+
+// ---- ts_* (source: ICT Turtle Soup Model) ----------------------------------
+type ts_SwingPoint
+    float price
+    int   barIndex
+    bool  taken = false
+
+type ts_Model
+    bool    isBull
+    int     sweepBar
+    float   sweepLevel
+    float   sweepExtreme
+    int     swingBar       = na
+    int     mssBar         = na
+    float   mssLevel       = na
+    bool    mssConfirmed   = false
+    bool    zoneConfluence = false
+    string  zoneType       = ""
+    float   zoneTop        = na
+    float   zoneBot        = na
+    int     zoneBar        = na
+    bool    doublePurge    = false
+    string  status         = "Formation"   // SOURCE DEFECT — see note below
+    float   innerTarget     = na
+    bool    innerSwept      = false
+    int     innerSweepBar   = na
+    line    innerLine       = na
+    label   innerLabel      = na
+    bool    entryConfirmed  = false
+    int     entryBar        = na
+    float   entryPrice      = na
+    line    sweepLine      = na
+    label   sweepLabel     = na
+    line    mssLine        = na
+    label   mssLabel       = na
+    box     sArea          = na
+    box     zoneBox        = na
+    line    zoneCe         = na
+    label   dpLabel        = na
+    label   c1Label        = na
+    line[]  sdLines
+    label[] sdLabels
+    // SOURCE DEFECT CORRECTED (Master Engine synthesis, documented per Locked
+    // Decision #4 / Architecture Spec §C.5): the original ICT Turtle Soup
+    // Model reuses the literal string "Formation" for BOTH the pre-sweep idle
+    // state and the post-entry-confirmed state, colliding two semantically
+    // distinct states under `m.status`. The underlying boolean flags used for
+    // branching (entryConfirmed, mssConfirmed, isInvalidated, isTargetHit)
+    // are UNCHANGED from source. A separate Master Engine-only enum field is
+    // added below to resolve the collision WITHOUT touching the original
+    // `status` field or any source-derived branching logic:
+    string  me_correctedStatus = "FORMATION"
+    // Valid values: "FORMATION" | "AWAITING_RETEST" | "ENTRY_CONFIRMED" |
+    //               "RESOLVED_SUCCESS" | "INVALIDATED"
+    // This field is set alongside (never instead of) the original `status`
+    // field at each transition point when Milestone-ts logic is ported.
+
+// =============================================================================
+// PART 3 — NAMESPACED UTILITY-FUNCTION NAME MAP (reference only, this
+// milestone does not yet port the function BODIES — see note below)
+// =============================================================================
+// The following collisions were identified across the five source files
+// (Architecture Spec / Source Audit, Technical Risk #1-#2). This table fixes
+// the FINAL name each function will carry once its body is ported in the
+// milestone that owns its logic (per Implementation Order). No function
+// bodies are ported in Milestone 1/2 — only types and the naming contract,
+// so that later milestones have an unambiguous, pre-agreed target name and
+// cannot introduce fresh collisions.
+//
+//   ORIGINAL NAME        SOURCE FILE(S)         NAMESPACED TARGET NAME(S)
+//   -----------------    -----------------      ---------------------------------
+//   f_lineStyle           CRT, Turtle Soup        crt_f_lineStyle / ts_f_lineStyle
+//   f_labelSize           CRT, Turtle Soup        crt_f_labelSize / ts_f_labelSize
+//   f_deleteModel         CRT, Turtle Soup        crt_f_deleteModel / ts_f_deleteModel
+//   f_newModel            CRT, Turtle Soup        crt_f_newModel / ts_f_newModel
+//   f_dashSize/f_dashPos  CRT                     crt_f_dashSize / crt_f_dashPos
+//   f_tablePos            Turtle Soup             ts_f_tablePos
+//   get_position/get_size CISD                    cisd_get_position / cisd_get_size
+//   f_getTablePosition    Unicorn                 uni_f_getTablePosition
+//   f_getLabelSize/       Unicorn                 uni_f_getLabelSize /
+//     f_getLineStyle                               uni_f_getLineStyle
+//   autoHTF               IFVG                    ifvg_autoHTF   (RETIRED —
+//                                                   see Part 0 note; not ported,
+//                                                   fixed hierarchy used instead)
+//   getAutoHTFs           Unicorn                 uni_getAutoHTFs (RETIRED — same)
+//   getHTFPeriod          CISD                    cisd_getHTFPeriod (RETIRED — same)
+//   f_fractalTF           Turtle Soup             ts_f_fractalTF  (KEPT — Turtle
+//                                                   Soup is an isolated alt-model
+//                                                   per spec §21 and retains its
+//                                                   own fractal TF selection
+//                                                   internally; it is NOT part of
+//                                                   the Master hierarchy, so its
+//                                                   auto-TF system is source-
+//                                                   faithful and unaffected by
+//                                                   the Part-0 retirement above)
+//   getSMTPair            CRT                     RETIRED — replaced by fixed
+//                                                   me_SMT_PAIR (Part 0). Ticker-
+//                                                   string-matching apparatus
+//                                                   dropped as a documented
+//                                                   Master Engine modification
+//                                                   (Technical Risk #8).
+//   getContractSize /     Unicorn                 RETIRED for this build —
+//     calculatePositionSize /                      position-sizing is a Tier-3
+//     formatPositionSize                            user-preference feature, out
+//                                                   of scope for Core Engine
+//                                                   Hardening milestones 1-13;
+//                                                   may be reinstated namespaced
+//                                                   (uni_getContractSize etc.) in
+//                                                   a later phase without any
+//                                                   architectural impact.
+//
+// All other function names in the five source files are already unique
+// across the corpus and require no renaming; they will be ported with an
+// explicit source-module prefix regardless (e.g. `f_findFVG` -> `ts_f_findFVG`)
+// purely for consistency and traceability, per Architecture Spec §B.2 rule.
+// =============================================================================
+
+// =============================================================================
+// PART 4 — GLOBAL STATE SCAFFOLD (declarations only; population begins in the
+// milestone that owns each engine's logic)
+// =============================================================================
+
+// ---- Master Engine canonical state ----
+var me_SetupGenealogy[] me_genealogyLog = array.new<me_SetupGenealogy>()
+var string me_lastFinalState = "WAIT"
+
+// ---- crt_* state (populated: Milestone 4) ----
+var crt_Model crt_curModel  = crt_Model.new()
+var crt_Model crt_prevModel = crt_Model.new()
+var crt_Model[] crt_modelHistory = array.new<crt_Model>()
+var crt_CandleSet crt_htf1 = crt_CandleSet.new(array.new<crt_Candle>(0), crt_CandleSettings.new(true, me_TF_4H, 4), na, array.new<line>(0))
+var crt_SMT[] crt_smtArray = array.new<crt_SMT>()
+var string crt_globalBias = "Neutral"
+
+// ---- cisd_* state (populated: Milestone 5) — AUTHORITATIVE CISD ENGINE ----
+var cisd_FVG[] cisd_activeFVGs = array.new<cisd_FVG>()
+var cisd_Setup[] cisd_setups = array.new<cisd_Setup>()
+var int cisd_market_bias = 0
+var float cisd_level = na
+var int cisd_start_bar = na
+var float cisd_swing_pivot = na
+var int cisd_swing_pivot_bar = na
+
+// ---- ifvg_* state (populated: Milestone 8) ----
+var ifvg_SwingFVG[] ifvg_validBullish = array.new<ifvg_SwingFVG>()
+var ifvg_SwingFVG[] ifvg_validBearish = array.new<ifvg_SwingFVG>()
+var ifvg_Trade[]    ifvg_activeTrades = array.new<ifvg_Trade>()
+var ifvg_Trade[]    ifvg_setupRecords = array.new<ifvg_Trade>()
+
+// ---- uni_* state (populated: Milestone 8) ----
+var uni_HTFLevel[] uni_activeHTFLevels = array.new<uni_HTFLevel>()
+var uni_Setup[] uni_activeSetups = array.new<uni_Setup>()
+
+// ---- ts_* state (populated: Milestone 12, isolated alt-model, spec §21) ----
+var ts_SwingPoint[] ts_bslArray = array.new<ts_SwingPoint>()
+var ts_SwingPoint[] ts_sslArray = array.new<ts_SwingPoint>()
+var ts_Model[] ts_models = array.new<ts_Model>()
+
+// =============================================================================
+// PART 5 — INPUT SCAFFOLD (namespaced groups; module-specific inputs are
+// added by the milestone that implements that module's logic, to avoid an
+// unreviewable wall of unused inputs at this stage)
+// =============================================================================
+
+grp_meCore = "Master Engine — Core"
+me_i_debugMode = input.bool(true, "Debug Mode (spec §31)", group = grp_meCore,
+     tooltip = "Compact diagnostic dump. Wired in Milestone 14.")
+me_i_hideLosing = input.bool(false, "Hide Losing Setups", group = grp_meCore,
+     tooltip = "LOCKED OFF per spec §17/§40.3 (anti-survivorship-bias rule). " +
+     "This input exists for future display-only convenience but the research " +
+     "/ genealogy / debug data layer will NEVER honor a 'true' value.")
+
+grp_meContext = "Master Engine — 1W/1D Context (CONFIGURABLE RESEARCH MODULE)"
+// Per approval Correction #3: this is an explicitly non-final, configurable
+// research module, not a proven trading rule. Sensitivity inputs are added
+// when Milestone 6 (1W/1D Context) is implemented.
+
+// =============================================================================
+// TEMPORARY COMPILE SENTINEL — REMOVE/REPLACE DURING FIRST VISUAL MILESTONE
+// =============================================================================
+// TradingView requires every indicator() script to contain at least one
+// plot*(), barcolor(), bgcolor(), hline(), alertcondition(), or drawing call
+// (compiler error CE10246). Milestones 1-2 intentionally contain zero
+// plotting/drawing/signal logic (types and state scaffolding only), so this
+// requirement cannot be met by any real output without violating the
+// "do not add trading logic just to satisfy the compiler" instruction.
+//
+// The line below is a NO-OP sentinel:
+//   - plots `na` (nothing is ever drawn — `na` never renders a point/line)
+//   - `display = display.none` additionally suppresses it from every pane,
+//     the price scale, and the data window
+//   - it reads no series, touches no Master Engine or source-derived state,
+//     computes nothing, and has no effect on calculations, signals, alerts,
+//     backtesting, or repaint behavior
+//
+// It exists ONLY to satisfy CE10246 during this scaffolding phase and MUST
+// be deleted (or replaced by real, milestone-appropriate output) the moment
+// the first genuine visual/signal element is introduced — per the plan,
+// that is expected no earlier than Milestone 4 (4H CRT primary engine) or
+// Milestone 14 (Debug Mode), whichever produces the first real draw call.
+plot(na, title = "TEMPORARY COMPILE SENTINEL — REMOVE/REPLACE DURING FIRST VISUAL MILESTONE", display = display.none)
+
+// =============================================================================
+// END OF MILESTONE 1 + 2
+// No plotting, alerting, or signal logic is executed yet beyond the inert
+// sentinel immediately above. This file is expected to compile with all
+// declarations above, but performs no meaningful chart drawing — this is
+// intentional for this milestone (verifies namespacing/type-collision
+// resolution in isolation before any detection logic is layered on top in
+// Milestone 3+).
+// =============================================================================
