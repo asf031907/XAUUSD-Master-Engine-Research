@@ -1,7 +1,7 @@
 # MASTER_ENGINE_STATE.md
 ### XAUUSD Master Engine — Implementation State Tracker
-**Last updated:** after Milestone 1 + Milestone 2, post compile-sentinel fix (CE10246)
-**Build file:** `MASTER_ENGINE_v0.1_M1M2.pine`
+**Last updated:** after Milestone 3 (Liquidity and Sweep adapters)
+**Build file:** `MASTER_ENGINE_v0.1_M1M2.pine` (filename retained across milestones per your file-naming; content now covers Milestones 1–3)
 
 ---
 
@@ -9,27 +9,26 @@
 
 | # | Milestone | Status | Notes |
 |---|---|---|---|
-| 1 | Pine v6 namespacing & source compatibility layer | ⚠️ CODE COMPLETE — compile verification pending | All UDTs from all 5 source files renamed per Architecture Spec §B.2 (`crt_`, `cisd_`, `ifvg_`, `uni_`, `ts_`). Function-name collision map documented (Part 3 of .pine file) — bodies not yet ported, only the agreed target names, so later milestones cannot introduce new collisions. |
-| 2 | Canonical Master Engine data types | ⚠️ CODE COMPLETE — compile verification pending | All 7 types from Architecture Spec §B.1 implemented verbatim: `me_LiquidityObject`, `me_SweepEvent`, `me_StructureEvent`, `me_DisplacementEvent`, `me_SMTSubSignal`, `me_SMTAggregate`, `me_ContextState`, `me_SetupGenealogy`. First compile attempt returned CE10246 (see §4) — resolved with an inert temporary sentinel, not yet re-verified. |
+| 1 | Pine v6 namespacing & source compatibility layer | ✅ COMPILE-VERIFIED | Confirmed clean compile by user (TradingView, "COMPILED — no errors"). |
+| 2 | Canonical Master Engine data types | ✅ COMPILE-VERIFIED | Confirmed alongside Milestone 1 in the same compile pass. |
+| 3 | Liquidity and Sweep adapters | ⚠️ CODE COMPLETE — compile verification pending | CRT (Master primary), Unicorn (4 sources), IFVG, Turtle Soup all ported and wired into `me_liquidityLog` / `me_sweepLog`. Not yet re-compiled in TradingView since this milestone's code was added — see §4. |
 
-**Not yet started:** Milestones 3–19 (Liquidity/Sweep adapters through Performance audit).
-
-**Neither milestone will be marked ✅ fully verified until TradingView confirms a clean compile of the current file.**
+**Not yet started:** Milestones 4–19 (4H CRT primary engine through Performance audit).
 
 ---
 
 ## 2. CURRENT ARCHITECTURE
 
-- Single-file Pine v6 script (`indicator()`, overlay=true).
-- Shared object budget: `max_bars_back=5000`, `max_lines_count=500`, `max_boxes_count=500`, `max_labels_count=500`, `max_polylines_count=100` (script-wide, per Architecture Spec §F.1/§F.3).
-- Fixed HTF hierarchy constants declared (`me_TF_1W/1D/4H/1H/30M`) — supersede all five source files' own auto-timeframe systems **except** Turtle Soup's internal `f_fractalTF`, which is retained source-faithfully because Turtle Soup runs as a fully isolated alt-model (spec §21) and is not part of the Master causal hierarchy.
-- Fixed SMT pair constant (`me_SMT_PAIR = "XAGUSD"`) — replaces CRT's dynamic `getSMTPair()` ticker-matching apparatus (documented modification, Technical Risk #8).
-- All namespaced source UDTs declared with fields preserved verbatim from source (including CRT's internal `manipOpen`/`cisdDone` fields, explicitly annotated as NOT the Master CISD Engine).
-- `ts_Model` includes the Locked-Decision-#4 correction: an additional `me_correctedStatus` field added alongside (not replacing) the original defective `status` field, per Architecture Spec §C.5.
-- Global `var` state scaffolding declared for every module (empty arrays / default model instances) — no population logic wired yet.
-- Input scaffold started: two Master Engine-wide inputs only (`me_i_debugMode`, `me_i_hideLosing` — the latter **hardcoded to only ever be honored as `false`** in downstream logic once written, per spec §17/§40.3). Module-specific inputs deliberately deferred to the milestone that implements that module, to avoid an unreviewable wall of dead inputs.
+Everything from the Milestone 1–2 state remains true, plus:
 
-**No detection logic, no plotting, no alerts, no signal generation exist in this build yet.** This is intentional and matches the "no uncontrolled giant pass" instruction.
+- **Part 5B** — new input groups: `grp_crtLiq` (no inputs — 4H fixed), `grp_uniLiq` (Unicorn's 4 sources: enable/timeframe/type per source, Manual-only), `grp_ifvgLiq` (Custom HTF only), `grp_tsLiq` (swing lookback).
+- **Part 6** — `me_liquidityLog` / `me_sweepLog` canonical arrays (capped at 500 entries, oldest-shifted, nothing filtered by outcome) plus `me_pushLiquidity()` / `me_pushSweep()` adapter helpers used by every source engine below.
+- **Part 7 (CRT, Master primary)** — headless (no drawing) chart-native 4H range accumulation via the `time(me_TF_4H)` boundary idiom (identical technique CRT source itself uses, requires **zero `request.security` calls**). Confirmed-on-close sweep comparison only — CRT's own real-time intrabar preview path (`rtSweptHigh`/`rtSweptLow`) is **not ported** in this milestone (scope + non-repaint decision, see §6 below).
+- **Part 8 (Unicorn, diagnostic)** — `uni_f_getHTFData()` (non-repaint hardened with a `barstate.isconfirmed` gate — documented behavioral change), `uni_f_findExtremeBar()`, `uni_f_registerLevel()` (extended with a `sourceTag` parameter and one `me_pushLiquidity()` call), 4 independent `request.security` calls (Sources A/B/C/D), and the native level-breach sweep loop.
+- **Part 9 (IFVG, diagnostic)** — HTF swing aggregation via the `time(htf)` boundary trick (zero `request.security` calls, matches source), `ifvg_SwingSet` methods, sweep-finder.
+- **Part 10 (Turtle Soup, diagnostic)** — `ta.pivothigh/low`-based pivot arrays (genuinely confirmed, `i_swingLen`-bar lag), native breach+close-back-confirmed sweep check.
+- **Retired (documented, Correction #2):** CRT's `tf_preset`/auto-HTF picker (primary path only — fixed to `me_TF_4H`), Unicorn's `getAutoHTFs()` "Automatic" mode, IFVG's `autoHTF()` "Auto" mode. Turtle Soup's own internal `f_fractalTF` auto-scheme is **retained** untouched since it belongs to the isolated alt-model (Milestone 12), not the Master hierarchy.
+- Compile sentinel **still present and still required** — no plotting/drawing was introduced this milestone (by design; see task's "no visual system yet" instruction).
 
 ---
 
@@ -37,70 +36,71 @@
 
 | # | Issue | Severity | Planned resolution |
 |---|---|---|---|
-| 1 | Script has not been compiled in the actual TradingView Pine Editor (no compiler available in this environment). | **Unverified — must confirm before Milestone 3** | You (or I, if you paste back an error) must confirm this file compiles cleanly in TradingView before further milestones build on top of it. |
-| 2 | `crt_htf1` var initialization references `me_TF_4H` and a literal `4` for `max_display` — this hardcodes CRT's HTF panel to 4H even though CRT's original `tf_preset`/`max_display_inp` inputs are not yet ported. | Low (cosmetic, panel-only) | Will be replaced with proper input wiring in Milestone 4. |
-| 3 | Function bodies for all namespaced utility functions (Part 3 name map) are not yet ported — only final target names are locked. | Expected at this stage | Bodies arrive with the milestone that owns that logic (3–12). |
+| 1 | Milestone 3 code has not yet been compiled in TradingView. | **Unverified — must confirm before Milestone 4** | Awaiting your compile test of the current file. |
+| 2 | Unicorn's `uni_f_getHTFData()` non-repaint hardening (added `barstate.isconfirmed` gate) is a **documented behavioral modification** from source — original emitted provisional swing values every tick; hardened version only updates on confirmed bars of the requested security feed. | Low (diagnostic-only signal, never gates Master Engine) | No further action planned; flagged here per Correction #1's documentation requirement. |
+| 3 | CRT's own real-time sweep preview (`rtSweptHigh`/`rtSweptLow`) is not yet ported anywhere (not even as diagnostic). | Expected at this stage | Will be ported in Milestone 4 as part of the full CRT Model 1/2 (it is a direct dependency of CRT's Order Block placement logic, which belongs there, not here). |
+| 4 | `me_liquidityLog`/`me_sweepLog` currently have no consumer — nothing reads them yet (Debug Mode is Milestone 14). | Expected at this stage | No action needed now; confirms the adapter layer is correctly decoupled from downstream consumption. |
+| 5 | `crt_htf1` (CandleSet, declared Milestone 1–2 for the future visual candle panel) remains unused. | Cosmetic | Populated in Milestone 4. |
 
 ---
 
 ## 4. COMPILE STATUS
 
-**AWAITING USER VERIFICATION.** (Not yet marked compile-verified — see below.)
+**Milestones 1–2: ✅ VERIFIED** — TradingView confirmed "COMPILED — no errors" after the compile-sentinel fix.
 
-**History:**
-- **First TradingView compile attempt:** returned `CE10246` — *"An indicator must contain at least one of the following: any 'plot*()' function, 'barcolor()', 'bgcolor()', 'hline()', 'alertcondition()', or any drawing (line, label, box, table, polyline)."*
-  - **Root cause:** expected and benign. Milestones 1–2 deliberately contain only type declarations and inert state scaffolding — no plotting, drawing, or signal logic exists yet by design, and TradingView requires at least one visual/output call for any script to compile, regardless of whether that script does anything meaningful yet.
-  - **Resolution applied:** a single **temporary compile sentinel** was added at the end of the file:
-    ```
-    plot(na, title = "TEMPORARY COMPILE SENTINEL — REMOVE/REPLACE DURING FIRST VISUAL MILESTONE", display = display.none)
-    ```
-    This plots `na` (renders nothing) with `display = display.none` (suppressed from every pane/scale/data window). It reads no series, touches no Master Engine or source-derived state, and has zero effect on calculations, signals, alerts, backtesting, or repaint behavior. It is clearly marked with a `REMOVE/REPLACE DURING FIRST VISUAL MILESTONE` banner in the code and must be deleted the moment genuine visual/signal output is introduced (expected Milestone 4 or Milestone 14).
+**Milestone 3: AWAITING USER VERIFICATION.** New code (Parts 5B–10) has been hand-reviewed for:
+- Duplicate identifiers (none found; all new functions/vars use the locked namespacing).
+- A signature/call-site mismatch was caught and fixed during self-review before delivery: `uni_f_registerLevel()` initially derived its Unicorn source-tag ("A"/"B"/"C"/"D") incorrectly from a timeframe-label substring; corrected to an explicit `sourceTag` parameter threaded through all 16 call sites (4 sources × OHLC/Swing × High/Low).
+- All `me_LiquidityObject.new()` / `me_SweepEvent.new()` calls checked against the exact field lists declared in Part 1.
 
-**Outstanding action required from you:** re-run the TradingView compile test on the updated file (below) and confirm a clean compile (or report the next error verbatim). **Milestone 2 is not marked fully compile-verified until that confirmation is received.**
+**Action required from you:** re-compile and report clean pass or the next error verbatim, before Milestone 4 begins.
 
 ---
 
 ## 5. REPAINT STATUS
 
-**N/A for this milestone.** No `request.security()` calls, no signal logic, no historical/realtime-divergent code paths exist yet. Repaint audit begins meaningfully at Milestone 4 (first `request.security` usage: 4H CRT primary engine) and is formally scheduled at Milestone 18 (Historical vs realtime vs reloaded-chart audit) per the locked Implementation Order.
+Formal audit remains scheduled for Milestone 18, but per Correction §D this milestone's repaint-relevant decisions are:
+
+| Path | Status | Basis |
+|---|---|---|
+| CRT confirmed sweep (Master primary) | **Non-repainting** | Sweep comparison only ever runs against `crt_prevModel`, which is fully closed/confirmed by construction before the comparison executes (see Milestone 3 summary §D below for the full argument). |
+| Unicorn `uni_f_getHTFData()` | **Hardened** | Added `barstate.isconfirmed` gate (documented modification). |
+| Unicorn level-breach sweep loop | **Inherently intrabar** (source-faithful) | Diagnostic only; never reaches a Master Engine trigger. |
+| IFVG HTF swing aggregation + sweep-finder | **Non-repainting** (chart-native boundary accumulation, same class as CRT's) | Diagnostic only. |
+| Turtle Soup pivot sweep | **Non-repainting** (confirmed `ta.pivothigh/low`, close-back-confirmed) | Diagnostic only. |
+
+Full historical-vs-realtime-vs-reload testing (actually running the script through a reload) is a Milestone 18 activity requiring your TradingView environment — this table is a design-time argument, not an empirical confirmation.
 
 ---
 
 ## 6. PERFORMANCE STATUS
 
-**N/A for this milestone.** No loops, no per-bar heavy computation, no object drawing beyond the bare indicator shell. Performance audit is scheduled at Milestone 19 per the locked Implementation Order, after the `request.security` optimization pass (Correction #2) is applied module-by-module starting Milestone 4.
+No performance testing performed (Milestone 19). Known future concern carried forward unchanged from the Architecture Spec: Unicorn's `uni_f_findExtremeBar()` (≤1000-bar scan, triggered on new-level registration) and its breach-check loop (≤999 bars) are now live for the first time in this build. Turtle Soup and CRT's Milestone-3 code add negligible per-bar cost (pivot detection and boundary-triggered accumulation only).
 
 ---
 
 ## 7. REMAINING WORK (per locked Implementation Order)
 
-3. Liquidity and Sweep adapters (`me_LiquidityObject` / `me_SweepEvent` population from CRT/Unicorn/IFVG/Turtle Soup sources)
-4. 4H CRT primary engine (first `request.security` call — CRT-oriented liquidity + confirmed sweep + Model 1/Model 2 + reclaim, bundled per the finalized `request.security` optimization pass)
-5. 1H CISD + MSS (authoritative CISD Engine port + Turtle Soup MSS port, bundled into one `request.security` call)
-6. 1W / 1D Context — **configurable research module** (per Correction #3: HH/HL and LH/LL formulation exposed as inputs, explicitly non-final)
-7. Displacement research module (body/ATR formulation, placeholder thresholds exposed as inputs)
-8. FVG / IFVG / Unicorn POI layer (three independently-traceable POI engines)
-9. SMT HTF + Pivot + Aggregator (fixed XAUUSD↔XAGUSD pair)
-10. Session / Regime engine (fixed Master session windows, configurable permission, not mandatory)
+4. 4H CRT primary engine (Model 1 OB, Model 2 reclaim/manipOpen, CRT's own real-time sweep preview, first visual drawing — likely where the compile sentinel gets removed)
+5. 1H CISD + MSS
+6. 1W / 1D Context (configurable research module)
+7. Displacement research module
+8. FVG / IFVG / Unicorn POI layer
+9. SMT HTF + Pivot + Aggregator
+10. Session / Regime engine
 11. 30M Execution Engine
-12. Master Gate / Signal Engine (hierarchical gates, spec §27; Turtle Soup ported here too, as isolated alt-model, spec §21)
-13. Setup Genealogy (populate `me_SetupGenealogy` end-to-end)
-14. Debug Mode (spec §31 diagnostic dump)
-15. Alerts (spec §33, same confirmation rules as chart signals)
-16. Backtest / validation framework (spec §36–37)
+12. Master Gate / Signal Engine (Turtle Soup ported here as isolated alt-model)
+13. Setup Genealogy
+14. Debug Mode
+15. Alerts
+16. Backtest / validation framework
 17. Full compile/debug pass
-18. Historical vs realtime vs reloaded-chart repaint audit (spec §34)
+18. Historical vs realtime vs reloaded-chart repaint audit
 19. Performance audit
 
 ---
 
 ## 8. EXACT NEXT MILESTONE
 
-**Milestone 3 — Liquidity and Sweep adapters.**
+**Milestone 4 — 4H CRT primary engine**, pending your compile confirmation of the current Milestone 3 code. This is expected to be the first milestone that introduces real chart drawing (CRT range box / OB lines), at which point the temporary compile sentinel will be removed and replaced, per its own removal instructions embedded in the file.
 
-Before starting, per this document's §4: confirm Milestone 1+2 file compiles cleanly in the TradingView Pine Editor. If a compiler error is found, report it verbatim (do not paraphrase) so the exact line/token can be corrected without guessing.
-
-Once confirmed, Milestone 3 will:
-- Build the `liq_*` adapter functions that populate `me_LiquidityObject` from each source's native liquidity representation (CRT HTF range H/L as primary/`isMasterPrimary=true`; Unicorn's 4 configurable sources, IFVG's HTF-aggregated swings, and Turtle Soup's pivot arrays as diagnostic/`isMasterPrimary=false`), per Locked Decision #1.
-- Build the `me_SweepEvent` adapter functions per Locked Decision #2 (CRT confirmed-HTF-candle method as the only `isMasterPrimary=true` sweep path; Unicorn/IFVG/Turtle Soup's own sweep methods preserved unmodified as diagnostic-only paths).
-- This is the first milestone to port actual function bodies (not just type declarations), so it will be scoped tightly and returned to you before proceeding to Milestone 4.

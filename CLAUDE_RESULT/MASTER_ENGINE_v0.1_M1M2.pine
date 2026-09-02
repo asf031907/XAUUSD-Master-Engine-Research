@@ -526,14 +526,552 @@ grp_meContext = "Master Engine — 1W/1D Context (CONFIGURABLE RESEARCH MODULE)"
 // when Milestone 6 (1W/1D Context) is implemented.
 
 // =============================================================================
+// PART 5B — MILESTONE 3 INPUTS (Liquidity & Sweep adapter layer)
+// =============================================================================
+
+grp_crtLiq = "CRT — 4H Liquidity & Sweep (MASTER PRIMARY)"
+// No additional inputs required here: the 4H timeframe is FIXED to me_TF_4H
+// per the locked Master Engine hierarchy (Part 0). CRT's original tf_preset /
+// "Auto" HTF-pairing input is retired for the primary path — this is the
+// same class of retirement already applied to the other four sources' own
+// auto-timeframe systems (Correction #2), now extended to CRT's own preset
+// picker since the Master primary path has exactly one fixed timeframe.
+
+grp_uniLiq = "Unicorn — Liquidity Sources (diagnostic, non-primary)"
+// Unicorn's original "Automatic" htfMode (getAutoHTFs(), a generic
+// chart-resolution-based tiering scheme unrelated to ICT session structure)
+// is RETIRED per Correction #2 ("remove obsolete source auto-timeframe
+// systems where superseded by the fixed Master Engine hierarchy"). "Manual"
+// is now the only mode. This is a DOCUMENTED BEHAVIORAL CHANGE from source,
+// not a silent one. Per-source enable/timeframe/type inputs and their
+// DEFAULT VALUES are otherwise preserved verbatim from source.
+uni_i_useA  = input.bool(true, "Source A", inline = "uniA", group = grp_uniLiq)
+uni_i_tfA   = input.timeframe("15", "", inline = "uniA", group = grp_uniLiq)
+uni_i_typeA = input.string("OHLC + Swing", "", options = ["OHLC", "Swing", "OHLC + Swing"], inline = "uniA", group = grp_uniLiq)
+uni_i_useB  = input.bool(true, "Source B", inline = "uniB", group = grp_uniLiq)
+uni_i_tfB   = input.timeframe("60", "", inline = "uniB", group = grp_uniLiq)
+uni_i_typeB = input.string("OHLC + Swing", "", options = ["OHLC", "Swing", "OHLC + Swing"], inline = "uniB", group = grp_uniLiq)
+uni_i_useC  = input.bool(true, "Source C", inline = "uniC", group = grp_uniLiq)
+uni_i_tfC   = input.timeframe("240", "", inline = "uniC", group = grp_uniLiq)
+uni_i_typeC = input.string("OHLC + Swing", "", options = ["OHLC", "Swing", "OHLC + Swing"], inline = "uniC", group = grp_uniLiq)
+uni_i_useD  = input.bool(true, "Source D", inline = "uniD", group = grp_uniLiq)
+uni_i_tfD   = input.timeframe("1440", "", inline = "uniD", group = grp_uniLiq)
+uni_i_typeD = input.string("OHLC + Swing", "", options = ["OHLC", "Swing", "OHLC + Swing"], inline = "uniD", group = grp_uniLiq)
+
+grp_ifvgLiq = "IFVG — HTF Liquidity (diagnostic, non-primary)"
+// IFVG's original "Auto" htfMode (autoHTF()) is RETIRED for the identical
+// reason given above. "Custom" is now the only mode. Default value (1D)
+// unchanged from source.
+ifvg_i_customHTF = input.timeframe("1D", "HTF", group = grp_ifvgLiq)
+
+grp_tsLiq = "Turtle Soup — Pivot Liquidity (diagnostic, non-primary)"
+// Default and bounds unchanged from source (i_swingLen, Context Swing Lookback).
+ts_i_swingLen = input.int(15, "Context Swing Lookback", minval = 2, maxval = 50, group = grp_tsLiq)
+
+// =============================================================================
+// PART 6 — CANONICAL LOGS + ADAPTER HELPER FUNCTIONS (Master Engine synthesis)
+// =============================================================================
+// Every liquidity/sweep event recognized by any source engine below is
+// appended to one of these two logs via the adapter helpers. Logs are
+// capped (not truncated-and-forgotten — oldest entries are shifted out only
+// to bound memory; nothing marked SWEPT/INVALIDATED is ever filtered out
+// based on outcome, satisfying the "do not hide losing or invalidated
+// events" requirement). The cap value mirrors the shared visual-object
+// budget spirit (Architecture Spec §F.1) even though plain UDT arrays are
+// not subject to Pine's line/box/label ceilings.
+
+var me_LiquidityObject[] me_liquidityLog = array.new<me_LiquidityObject>()
+var me_SweepEvent[]      me_sweepLog     = array.new<me_SweepEvent>()
+
+me_pushLiquidity(me_LiquidityObject obj) =>
+    me_liquidityLog.push(obj)
+    if me_liquidityLog.size() > 500
+        me_liquidityLog.shift()
+
+me_pushSweep(me_SweepEvent ev) =>
+    me_sweepLog.push(ev)
+    if me_sweepLog.size() > 500
+        me_sweepLog.shift()
+
+// =============================================================================
+// PART 7 — CRT: 4H LIQUIDITY + CONFIRMED SWEEP  (MASTER PRIMARY)
+// =============================================================================
+// Source: CRT Pro+ by Artas. Ported concept: the chart-native HTF-range
+// accumulation and boundary-close sweep comparison used by CRT's own
+// curModel/prevModel mechanism (the SAME technique CRT source uses for its
+// candle panel and Model 1/2 — no request.security() call is needed for this
+// because the script's own chart bars are already finer than or equal to
+// the target 4H, so CRT accumulates HTF OHLC directly from chart-native
+// high/low/close across `time(me_TF_4H)` boundaries — a genuinely
+// non-repainting pattern already proven in source).
+//
+// SCOPE NOTE (Milestone 3 boundary): only the range (liquidity) and the
+// CONFIRMED-on-close sweep comparison are ported here. CRT's Model 1 (Order
+// Block) and Model 2 (manipOpen/reclaim) logic, its own real-time
+// (`rtSweptHigh`/`rtSweptLow`) intrabar preview mechanism, and all box/line/
+// label drawing are explicitly DEFERRED to Milestone 4 ("4H CRT primary
+// engine") — porting them now would exceed this milestone's stated scope
+// (Liquidity + Sweep adapters only) and would prematurely introduce visual
+// elements ahead of the "no visual system yet" instruction.
+//
+// NON-REPAINT DESIGN DECISION (Locked Decision #2 / Correction §D): the
+// Master PRIMARY sweep event is emitted ONLY from the confirmed-on-close
+// comparison (curModel vs. the fully-closed prevModel) — never from CRT's
+// intrabar realtime preview path. Because that realtime path is not ported
+// in this milestone at all (see scope note above), there is currently no
+// mechanism by which provisional/unconfirmed HTF data could reach
+// me_sweepLog with isMasterPrimary=true. This satisfies §D directly.
+
+var me_LiquidityObject crt_liqHigh = me_LiquidityObject.new(source = "CRT_HTF", liqType = "BSL", tf = me_TF_4H, price = na, createdBar = na, status = "CREATED", sweptBar = na, isMasterPrimary = true)
+var me_LiquidityObject crt_liqLow  = me_LiquidityObject.new(source = "CRT_HTF", liqType = "SSL", tf = me_TF_4H, price = na, createdBar = na, status = "CREATED", sweptBar = na, isMasterPrimary = true)
+
+bool crt_isNewHTF = ta.change(time(me_TF_4H)) != 0   // identical boundary idiom to CRT source
+
+if crt_isNewHTF
+    if not na(crt_curModel.o)
+        crt_curModel.endBar := bar_index - 1
+
+        if not na(crt_prevModel.o)
+            // Confirmed sweep comparison — verbatim CRT source math, renamed only.
+            crt_curModel.sweptHigh := crt_curModel.h > crt_prevModel.h and crt_curModel.c < crt_prevModel.h
+            crt_curModel.sweptLow  := crt_curModel.l < crt_prevModel.l and crt_curModel.c > crt_prevModel.l
+            crt_curModel.dpurge    := crt_curModel.sweptHigh and crt_curModel.sweptLow
+
+            crt_curModel.bias := crt_curModel.dpurge ? (crt_curModel.c > crt_curModel.o ? "Bullish" : "Bearish") :
+                 crt_curModel.sweptHigh ? "Bearish" :
+                 crt_curModel.sweptLow  ? "Bullish" : "Neutral"
+            crt_curModel.status := (crt_curModel.sweptHigh or crt_curModel.sweptLow) ? "Active" : "Formation"
+            crt_globalBias := crt_curModel.bias
+
+            // ---- Sweep adapter: emit Master-primary me_SweepEvent(s) ----
+            if crt_curModel.sweptHigh
+                crt_liqHigh.status   := "SWEPT"
+                crt_liqHigh.sweptBar := crt_curModel.h_bar
+                me_pushSweep(me_SweepEvent.new(source = "CRT", direction = "BEARISH_SWEEP", tf = me_TF_4H, barIndex = bar_index, sweepExtreme = crt_curModel.h, sweptLevel = crt_prevModel.h, isMasterPrimary = true))
+            if crt_curModel.sweptLow
+                crt_liqLow.status   := "SWEPT"
+                crt_liqLow.sweptBar := crt_curModel.l_bar
+                me_pushSweep(me_SweepEvent.new(source = "CRT", direction = "BULLISH_SWEEP", tf = me_TF_4H, barIndex = bar_index, sweepExtreme = crt_curModel.l, sweptLevel = crt_prevModel.l, isMasterPrimary = true))
+            // NOTE: an explicit NO_SWEEP entry is intentionally NOT logged every
+            // period — NO_SWEEP is the implicit default and logging it every 4H
+            // close would flood me_sweepLog without adding information (spec §9:
+            // "do not repeatedly signal the same [non-]event").
+
+        crt_prevModel := crt_curModel
+
+        // ---- Liquidity adapter: refresh canonical objects for the newly
+        // confirmed 4H range (this becomes the ACTIVE liquidity going into the
+        // next period) ----
+        me_pushLiquidity(crt_liqHigh)   // log final state of the just-expired pair
+        me_pushLiquidity(crt_liqLow)
+        crt_liqHigh := me_LiquidityObject.new(source = "CRT_HTF", liqType = "BSL", tf = me_TF_4H, price = crt_prevModel.h, createdBar = crt_prevModel.h_bar, status = "ACTIVE", sweptBar = na, isMasterPrimary = true)
+        crt_liqLow  := me_LiquidityObject.new(source = "CRT_HTF", liqType = "SSL", tf = me_TF_4H, price = crt_prevModel.l, createdBar = crt_prevModel.l_bar, status = "ACTIVE", sweptBar = na, isMasterPrimary = true)
+
+    // Start accumulating the new (as-yet-unconfirmed) 4H model. Headless —
+    // no box/line created at this milestone (see scope note above).
+    crt_curModel := crt_Model.new(o = open, h = high, l = low, c = close, startBar = bar_index, endBar = bar_index, h_bar = bar_index, l_bar = bar_index, h_bar_open = open, l_bar_open = open)
+else
+    if high > crt_curModel.h
+        crt_curModel.h          := high
+        crt_curModel.h_bar      := bar_index
+        crt_curModel.h_bar_open := open
+    if low < crt_curModel.l
+        crt_curModel.l          := low
+        crt_curModel.l_bar      := bar_index
+        crt_curModel.l_bar_open := open
+    crt_curModel.c := close
+
+// =============================================================================
+// PART 8 — UNICORN: 4-SOURCE LIQUIDITY + NATIVE SWEEP  (diagnostic, non-primary)
+// =============================================================================
+// Source: Unicorn Model pro (MPL 2.0, (c) 2026 fxraptor-alpha). Ported
+// unchanged: f_getHTFData (with non-repaint hardening, see note), f_registerLevel,
+// f_findExtremeBar, and the native level-breach sweep-check loop.
+
+// ---- ts note: NON-REPAINT HARDENING (Locked Decision #11 / Correction §D) ----
+// Source Audit Repaint Risk #3 flagged this function's `isSwingHigh`/
+// `isSwingLow` computation as HIGH severity: it evaluates on the CURRENT,
+// potentially still-forming HTF bar inside request.security. This is a
+// DOCUMENTED BEHAVIORAL MODIFICATION from source: the function now only
+// returns non-na swing/pivot values when `barstate.isconfirmed` is true on
+// the requested security context, mirroring the proven-safe pattern already
+// used natively by CISD Pro+'s own `detectFVG()`. Unicorn's liquidity role is
+// diagnostic-only (isMasterPrimary=false) so this hardening is not strictly
+// required to satisfy §D's "no unconfirmed data may become a Master trigger"
+// rule — it is applied anyway, in the spirit of "audit ALL repaint risk"
+// (spec §34), so Debug/Genealogy output cannot show a diagnostic reading
+// that would not actually have been visible in realtime.
+uni_f_getHTFData() =>
+    float hPrev = na
+    float lPrev = na
+    float latestSH = na
+    float latestSL = na
+    if barstate.isconfirmed
+        hPrev := high[1]
+        lPrev := low[1]
+        bool isSwingHigh = high > high[1] and close < close[1]
+        bool isSwingLow  = low < low[1] and close > close[1]
+        latestSH := ta.valuewhen(isSwingHigh, high, 0)
+        latestSL := ta.valuewhen(isSwingLow, low, 0)
+    [hPrev, lPrev, latestSH, latestSL]
+
+// f_findExtremeBar — unchanged from source (renamed only). Known heavy loop
+// (Source Audit / Architecture Spec §F.2, up to 1000-bar scan) — preserved
+// verbatim per "do not optimize by deleting required source logic."
+uni_f_findExtremeBar(float priceVal, bool isHigh) =>
+    int extBar = na
+    if not na(priceVal)
+        for i = 0 to 1000
+            if i >= bar_index
+                break
+            float checkVal = isHigh ? high[i] : low[i]
+            if math.abs(checkVal - priceVal) < (syminfo.mintick * 0.1)
+                extBar := bar_index - i
+                break
+    extBar
+
+// f_getTFLabel — unchanged from source (renamed only). Converts a timeframe
+// string to a short display label (e.g. "60" -> "1H"). Used purely for
+// uni_HTFLevel.labelText / uni_HTFLevel.tfLabel bookkeeping, not for
+// canonical source tagging (see sourceTag parameter below).
+uni_f_getTFLabel(string tf) =>
+    seconds = timeframe.in_seconds(tf)
+    res = ""
+    if seconds < 60
+        res := str.tostring(seconds) + "S"
+    else if (seconds / 60) < 60
+        res := str.tostring(math.round(seconds / 60)) + "m"
+    else if (seconds / 3600) < 24
+        res := str.tostring(math.round(seconds / 3600)) + "H"
+    else if (seconds / 86400) < 7
+        res := str.tostring(math.round(seconds / 86400)) + "D"
+    else if (seconds / 86400) < 30
+        res := str.tostring(math.round(seconds / 604800)) + "W"
+    else
+        res := str.tostring(math.round(seconds / 2592000)) + "M"
+    res
+
+// f_registerLevel — unchanged algorithm (renamed only), EXTENDED with:
+//   (1) a `sourceTag` parameter ("A"/"B"/"C"/"D") identifying WHICH of the
+//       four configured Unicorn sources triggered this registration, and
+//   (2) a single adapter call (me_pushLiquidity) at the point a new level
+//       is confirmed and pushed.
+// Both are precisely the "translate source-native events into the
+// canonical object" requirement (task §A) — the detection math itself
+// (extreme-bar scan, already-breached check, existing-level merge) is
+// byte-for-byte unchanged from source.
+uni_f_registerLevel(string sourceTag, string tfLabel, string lvlType, bool isHigh, float priceVal) =>
+    if not na(priceVal)
+        int extBar = uni_f_findExtremeBar(priceVal, isHigh)
+        int startB = na(extBar) ? bar_index : extBar
+
+        int startSearch = math.max(startB + 1, bar_index - 999)
+        bool alreadyBreached = false
+        if not na(extBar) and startSearch <= bar_index - 1
+            for i = startSearch to bar_index - 1
+                float checkHigh = high[bar_index - i]
+                float checkLow  = low[bar_index - i]
+                if isHigh and checkHigh >= priceVal
+                    alreadyBreached := true
+                    break
+                else if not isHigh and checkLow <= priceVal
+                    alreadyBreached := true
+                    break
+
+        if not alreadyBreached
+            bool exists = false
+            if array.size(uni_activeHTFLevels) > 0
+                for i = 0 to array.size(uni_activeHTFLevels) - 1
+                    lvl = array.get(uni_activeHTFLevels, i)
+                    if not lvl.isSwept and lvl.isHigh == isHigh and math.abs(lvl.price - priceVal) < (syminfo.mintick * 0.1)
+                        string searchStr = tfLabel + " " + lvlType
+                        if not str.contains(lvl.labelText, searchStr)
+                            lvl.labelText := lvl.labelText + ", " + searchStr
+                        exists := true
+                        break
+
+            if not exists
+                string labelTxt = tfLabel + " " + lvlType
+                uni_HTFLevel newLvl = uni_HTFLevel.new(tfLabel = tfLabel, levelType = lvlType, isHigh = isHigh, price = priceVal, startBar = startB, isSwept = false, sweepBar = na, labelText = labelTxt)
+                array.push(uni_activeHTFLevels, newLvl)
+                // ---- Liquidity adapter: canonical event, non-primary ----
+                me_pushLiquidity(me_LiquidityObject.new(source = "UNICORN_" + sourceTag, liqType = isHigh ? "BSL" : "SSL", tf = tfLabel, price = priceVal, createdBar = startB, status = "ACTIVE", sweptBar = na, isMasterPrimary = false))
+
+// ---- Per-source HTF fetches (4 independent request.security calls — see
+// Milestone 3 request.security inventory in the accompanying review notes) ----
+[uni_prevH_A, uni_prevL_A, uni_sh_A, uni_sl_A] = request.security(syminfo.tickerid, uni_i_tfA, uni_f_getHTFData(), barmerge.gaps_off, barmerge.lookahead_off)
+[uni_prevH_B, uni_prevL_B, uni_sh_B, uni_sl_B] = request.security(syminfo.tickerid, uni_i_tfB, uni_f_getHTFData(), barmerge.gaps_off, barmerge.lookahead_off)
+[uni_prevH_C, uni_prevL_C, uni_sh_C, uni_sl_C] = request.security(syminfo.tickerid, uni_i_tfC, uni_f_getHTFData(), barmerge.gaps_off, barmerge.lookahead_off)
+[uni_prevH_D, uni_prevL_D, uni_sh_D, uni_sl_D] = request.security(syminfo.tickerid, uni_i_tfD, uni_f_getHTFData(), barmerge.gaps_off, barmerge.lookahead_off)
+
+var float uni_lastPrevH_A = na
+var float uni_lastSh_A = na
+var float uni_lastPrevL_A = na
+var float uni_lastSl_A = na
+var float uni_lastPrevH_B = na
+var float uni_lastSh_B = na
+var float uni_lastPrevL_B = na
+var float uni_lastSl_B = na
+var float uni_lastPrevH_C = na
+var float uni_lastSh_C = na
+var float uni_lastPrevL_C = na
+var float uni_lastSl_C = na
+var float uni_lastPrevH_D = na
+var float uni_lastSh_D = na
+var float uni_lastPrevL_D = na
+var float uni_lastSl_D = na
+
+if uni_i_useA
+    if uni_i_typeA == "OHLC" or uni_i_typeA == "OHLC + Swing"
+        if uni_prevH_A != uni_lastPrevH_A or (na(uni_lastPrevH_A) and not na(uni_prevH_A))
+            uni_lastPrevH_A := uni_prevH_A
+            uni_f_registerLevel("A", uni_f_getTFLabel(uni_i_tfA), "OHLC", true, uni_prevH_A)
+        if uni_prevL_A != uni_lastPrevL_A or (na(uni_lastPrevL_A) and not na(uni_prevL_A))
+            uni_lastPrevL_A := uni_prevL_A
+            uni_f_registerLevel("A", uni_f_getTFLabel(uni_i_tfA), "OHLC", false, uni_prevL_A)
+    if uni_i_typeA == "Swing" or uni_i_typeA == "OHLC + Swing"
+        if uni_sh_A != uni_lastSh_A or (na(uni_lastSh_A) and not na(uni_sh_A))
+            uni_lastSh_A := uni_sh_A
+            uni_f_registerLevel("A", uni_f_getTFLabel(uni_i_tfA), "Swing", true, uni_sh_A)
+        if uni_sl_A != uni_lastSl_A or (na(uni_lastSl_A) and not na(uni_sl_A))
+            uni_lastSl_A := uni_sl_A
+            uni_f_registerLevel("A", uni_f_getTFLabel(uni_i_tfA), "Swing", false, uni_sl_A)
+
+if uni_i_useB
+    if uni_i_typeB == "OHLC" or uni_i_typeB == "OHLC + Swing"
+        if uni_prevH_B != uni_lastPrevH_B or (na(uni_lastPrevH_B) and not na(uni_prevH_B))
+            uni_lastPrevH_B := uni_prevH_B
+            uni_f_registerLevel("B", uni_f_getTFLabel(uni_i_tfB), "OHLC", true, uni_prevH_B)
+        if uni_prevL_B != uni_lastPrevL_B or (na(uni_lastPrevL_B) and not na(uni_prevL_B))
+            uni_lastPrevL_B := uni_prevL_B
+            uni_f_registerLevel("B", uni_f_getTFLabel(uni_i_tfB), "OHLC", false, uni_prevL_B)
+    if uni_i_typeB == "Swing" or uni_i_typeB == "OHLC + Swing"
+        if uni_sh_B != uni_lastSh_B or (na(uni_lastSh_B) and not na(uni_sh_B))
+            uni_lastSh_B := uni_sh_B
+            uni_f_registerLevel("B", uni_f_getTFLabel(uni_i_tfB), "Swing", true, uni_sh_B)
+        if uni_sl_B != uni_lastSl_B or (na(uni_lastSl_B) and not na(uni_sl_B))
+            uni_lastSl_B := uni_sl_B
+            uni_f_registerLevel("B", uni_f_getTFLabel(uni_i_tfB), "Swing", false, uni_sl_B)
+
+if uni_i_useC
+    if uni_i_typeC == "OHLC" or uni_i_typeC == "OHLC + Swing"
+        if uni_prevH_C != uni_lastPrevH_C or (na(uni_lastPrevH_C) and not na(uni_prevH_C))
+            uni_lastPrevH_C := uni_prevH_C
+            uni_f_registerLevel("C", uni_f_getTFLabel(uni_i_tfC), "OHLC", true, uni_prevH_C)
+        if uni_prevL_C != uni_lastPrevL_C or (na(uni_lastPrevL_C) and not na(uni_prevL_C))
+            uni_lastPrevL_C := uni_prevL_C
+            uni_f_registerLevel("C", uni_f_getTFLabel(uni_i_tfC), "OHLC", false, uni_prevL_C)
+    if uni_i_typeC == "Swing" or uni_i_typeC == "OHLC + Swing"
+        if uni_sh_C != uni_lastSh_C or (na(uni_lastSh_C) and not na(uni_sh_C))
+            uni_lastSh_C := uni_sh_C
+            uni_f_registerLevel("C", uni_f_getTFLabel(uni_i_tfC), "Swing", true, uni_sh_C)
+        if uni_sl_C != uni_lastSl_C or (na(uni_lastSl_C) and not na(uni_sl_C))
+            uni_lastSl_C := uni_sl_C
+            uni_f_registerLevel("C", uni_f_getTFLabel(uni_i_tfC), "Swing", false, uni_sl_C)
+
+if uni_i_useD
+    if uni_i_typeD == "OHLC" or uni_i_typeD == "OHLC + Swing"
+        if uni_prevH_D != uni_lastPrevH_D or (na(uni_lastPrevH_D) and not na(uni_prevH_D))
+            uni_lastPrevH_D := uni_prevH_D
+            uni_f_registerLevel("D", uni_f_getTFLabel(uni_i_tfD), "OHLC", true, uni_prevH_D)
+        if uni_prevL_D != uni_lastPrevL_D or (na(uni_lastPrevL_D) and not na(uni_prevL_D))
+            uni_lastPrevL_D := uni_prevL_D
+            uni_f_registerLevel("D", uni_f_getTFLabel(uni_i_tfD), "OHLC", false, uni_prevL_D)
+    if uni_i_typeD == "Swing" or uni_i_typeD == "OHLC + Swing"
+        if uni_sh_D != uni_lastSh_D or (na(uni_lastSh_D) and not na(uni_sh_D))
+            uni_lastSh_D := uni_sh_D
+            uni_f_registerLevel("D", uni_f_getTFLabel(uni_i_tfD), "Swing", true, uni_sh_D)
+        if uni_sl_D != uni_lastSl_D or (na(uni_lastSl_D) and not na(uni_sl_D))
+            uni_lastSl_D := uni_sl_D
+            uni_f_registerLevel("D", uni_f_getTFLabel(uni_i_tfD), "Swing", false, uni_sl_D)
+
+// ---- Unicorn native sweep-check loop (level breach) — unchanged from
+// source, renamed only. Chart-native/intrabar touch-based, exactly as in
+// source; diagnostic-only, isMasterPrimary=false throughout. ----
+bool uni_sweptHighFlag = false   // source name "sweptBull": a HIGH/BSL level was touched
+float uni_sweptHighPrice = na
+bool uni_sweptLowFlag = false    // source name "sweptBear": a LOW/SSL level was touched
+float uni_sweptLowPrice = na
+
+if array.size(uni_activeHTFLevels) > 0
+    for idx = array.size(uni_activeHTFLevels) - 1 to 0
+        lvl = array.get(uni_activeHTFLevels, idx)
+        bool swept = false
+        if lvl.isHigh
+            if high >= lvl.price
+                swept := true
+                uni_sweptHighFlag := true
+                if na(uni_sweptHighPrice) or lvl.price > uni_sweptHighPrice
+                    uni_sweptHighPrice := lvl.price
+        else
+            if low <= lvl.price
+                swept := true
+                uni_sweptLowFlag := true
+                if na(uni_sweptLowPrice) or lvl.price < uni_sweptLowPrice
+                    uni_sweptLowPrice := lvl.price
+        if swept
+            lvl.isSwept := true
+            lvl.sweepBar := bar_index
+            array.remove(uni_activeHTFLevels, idx)
+
+while array.size(uni_activeHTFLevels) > 100
+    array.shift(uni_activeHTFLevels)
+
+// ---- Sweep adapter: canonical diagnostic events ----
+// Direction mapping preserved from CRT's own bias convention (sweeping a
+// HIGH/BSL level implies BEARISH follow-through; sweeping a LOW/SSL level
+// implies BULLISH follow-through) for schema consistency across sources.
+if uni_sweptHighFlag
+    me_pushSweep(me_SweepEvent.new(source = "UNICORN", direction = "BEARISH_SWEEP", tf = "MULTI", barIndex = bar_index, sweepExtreme = high, sweptLevel = uni_sweptHighPrice, isMasterPrimary = false))
+if uni_sweptLowFlag
+    me_pushSweep(me_SweepEvent.new(source = "UNICORN", direction = "BULLISH_SWEEP", tf = "MULTI", barIndex = bar_index, sweepExtreme = low, sweptLevel = uni_sweptLowPrice, isMasterPrimary = false))
+
+// =============================================================================
+// PART 9 — IFVG: HTF-AGGREGATED SWING LIQUIDITY + NATIVE SWEEP (diagnostic)
+// =============================================================================
+// Source: IFVG Pro+ ("IFVG "). Ported unchanged: the chart-native HTF
+// high/low aggregation across `time(htf)` boundaries and the SwingSet
+// sweep-finder. This is IFVG's "Sweep Detector" region, a DIFFERENT code
+// path from the pivot-origin IFVG-box detection flagged as Repaint Risk #4
+// in the Source Audit (that region is POI logic, out of scope for
+// Milestone 3 — it belongs to the POI layer, Milestone 8).
+// No request.security() call is used here — matches source exactly (chart-
+// native accumulation, same non-repainting boundary-trick class as CRT's).
+
+method ifvg_addPoint(ifvg_SwingSet this, float y, int t) =>
+    this.points.push(ifvg_SwingPoint.new(y, t))
+    if this.points.size() > 50
+        this.points.remove(0)
+
+method ifvg_findSweep(ifvg_SwingSet this, float testPrice, bool isHigh) =>
+    bool  found  = false
+    float foundY = na
+    int   foundT = na
+    if this.points.size() > 0
+        for i = this.points.size() - 1 to 0
+            pt = this.points.get(i)
+            bool isSwept = isHigh ? testPrice > pt.y : testPrice < pt.y
+            if isSwept
+                bool better = not found or (isHigh ? pt.y > foundY : pt.y < foundY)
+                if better
+                    foundY := pt.y
+                    foundT := pt.t
+                found := true
+                this.points.remove(i)
+    [found, foundY, foundT]
+
+ifvg_htf = ifvg_i_customHTF   // "Auto" mode retired — see Part 5B note
+
+var float ifvg_htfCurH     = high
+var int   ifvg_htfCurHTime = time
+var float ifvg_htfCurL     = low
+var int   ifvg_htfCurLTime = time
+var float[] ifvg_htfHighs    = array.new<float>()
+var float[] ifvg_htfLows     = array.new<float>()
+var int[]   ifvg_htfHighTime = array.new<int>()
+var int[]   ifvg_htfLowTime  = array.new<int>()
+
+ifvg_htfChanged = time(ifvg_htf) != time(ifvg_htf)[1]
+
+if ifvg_htfChanged
+    ifvg_htfHighs.push(ifvg_htfCurH)
+    ifvg_htfLows.push(ifvg_htfCurL)
+    ifvg_htfHighTime.push(ifvg_htfCurHTime)
+    ifvg_htfLowTime.push(ifvg_htfCurLTime)
+    if ifvg_htfHighs.size() > 55
+        ifvg_htfHighs.shift()
+        ifvg_htfLows.shift()
+        ifvg_htfHighTime.shift()
+        ifvg_htfLowTime.shift()
+    ifvg_htfCurH     := high
+    ifvg_htfCurHTime := time
+    ifvg_htfCurL     := low
+    ifvg_htfCurLTime := time
+else
+    if high > ifvg_htfCurH
+        ifvg_htfCurH     := high
+        ifvg_htfCurHTime := time
+    if low < ifvg_htfCurL
+        ifvg_htfCurL     := low
+        ifvg_htfCurLTime := time
+
+var ifvg_SwingSet ifvg_stHigh = ifvg_SwingSet.new(array.new<ifvg_SwingPoint>())
+var ifvg_SwingSet ifvg_stLow  = ifvg_SwingSet.new(array.new<ifvg_SwingPoint>())
+
+if ifvg_htfChanged and ifvg_htfHighs.size() >= 3
+    ifvg_n = ifvg_htfHighs.size()
+    ifvg_midHigh = ifvg_htfHighs.get(ifvg_n - 2)
+    if ifvg_midHigh >= ifvg_htfHighs.get(ifvg_n - 3) and ifvg_midHigh >= ifvg_htfHighs.get(ifvg_n - 1)
+        ifvg_stHigh.ifvg_addPoint(ifvg_midHigh, ifvg_htfHighTime.get(ifvg_n - 2))
+        // ---- Liquidity adapter: canonical event, non-primary ----
+        me_pushLiquidity(me_LiquidityObject.new(source = "IFVG_HTF", liqType = "BSL", tf = ifvg_htf, price = ifvg_midHigh, createdBar = bar_index, status = "ACTIVE", sweptBar = na, isMasterPrimary = false))
+
+    ifvg_midLow = ifvg_htfLows.get(ifvg_n - 2)
+    if ifvg_midLow <= ifvg_htfLows.get(ifvg_n - 3) and ifvg_midLow <= ifvg_htfLows.get(ifvg_n - 1)
+        ifvg_stLow.ifvg_addPoint(ifvg_midLow, ifvg_htfLowTime.get(ifvg_n - 2))
+        me_pushLiquidity(me_LiquidityObject.new(source = "IFVG_HTF", liqType = "SSL", tf = ifvg_htf, price = ifvg_midLow, createdBar = bar_index, status = "ACTIVE", sweptBar = na, isMasterPrimary = false))
+
+[ifvg_sweepLowFound, ifvg_sweepLowPrice, ifvg_sweepLowTime]    = ifvg_stLow.ifvg_findSweep(low, false)
+[ifvg_sweepHighFound, ifvg_sweepHighPrice, ifvg_sweepHighTime] = ifvg_stHigh.ifvg_findSweep(high, true)
+
+// ---- Sweep adapter: canonical diagnostic events ----
+if ifvg_sweepHighFound
+    me_pushSweep(me_SweepEvent.new(source = "IFVG", direction = "BEARISH_SWEEP", tf = ifvg_htf, barIndex = bar_index, sweepExtreme = high, sweptLevel = ifvg_sweepHighPrice, isMasterPrimary = false))
+if ifvg_sweepLowFound
+    me_pushSweep(me_SweepEvent.new(source = "IFVG", direction = "BULLISH_SWEEP", tf = ifvg_htf, barIndex = bar_index, sweepExtreme = low, sweptLevel = ifvg_sweepLowPrice, isMasterPrimary = false))
+
+// =============================================================================
+// PART 10 — TURTLE SOUP: PIVOT LIQUIDITY + NATIVE SWEEP (diagnostic)
+// =============================================================================
+// Source: ICT Turtle Soup Model. Ported unchanged: ta.pivothigh/low-based
+// swing detection (a genuinely confirmed pivot, i_swingLen bars on each
+// side) and the native breach+close-back-confirmed sweep check. Chart-TF
+// (30M), fully isolated per spec §21 — feeds diagnostic logs only.
+
+ts_pivH = ta.pivothigh(high, ts_i_swingLen, ts_i_swingLen)
+ts_pivL = ta.pivotlow(low,  ts_i_swingLen, ts_i_swingLen)
+
+if not na(ts_pivH)
+    int ts_actualBarH = bar_index - ts_i_swingLen
+    ts_bslArray.push(ts_SwingPoint.new(ts_pivH, ts_actualBarH))
+    while ts_bslArray.size() > 60
+        ts_bslArray.shift()
+    me_pushLiquidity(me_LiquidityObject.new(source = "TURTLESOUP_PIVOT", liqType = "BSL", tf = timeframe.period, price = ts_pivH, createdBar = ts_actualBarH, status = "ACTIVE", sweptBar = na, isMasterPrimary = false))
+
+if not na(ts_pivL)
+    int ts_actualBarL = bar_index - ts_i_swingLen
+    ts_sslArray.push(ts_SwingPoint.new(ts_pivL, ts_actualBarL))
+    while ts_sslArray.size() > 60
+        ts_sslArray.shift()
+    me_pushLiquidity(me_LiquidityObject.new(source = "TURTLESOUP_PIVOT", liqType = "SSL", tf = timeframe.period, price = ts_pivL, createdBar = ts_actualBarL, status = "ACTIVE", sweptBar = na, isMasterPrimary = false))
+
+if ts_i_swingLen > 0 and array.size(ts_bslArray) > 0
+    for i = array.size(ts_bslArray) - 1 to 0
+        ts_sp = array.get(ts_bslArray, i)
+        if not ts_sp.taken and high > ts_sp.price and bar_index > ts_sp.barIndex
+            ts_sp.taken := true   // consumed regardless of outcome — verbatim source behavior
+            if close < ts_sp.price
+                me_pushSweep(me_SweepEvent.new(source = "TURTLESOUP", direction = "BEARISH_SWEEP", tf = timeframe.period, barIndex = bar_index, sweepExtreme = high, sweptLevel = ts_sp.price, isMasterPrimary = false))
+
+if ts_i_swingLen > 0 and array.size(ts_sslArray) > 0
+    for i = array.size(ts_sslArray) - 1 to 0
+        ts_sp2 = array.get(ts_sslArray, i)
+        if not ts_sp2.taken and low < ts_sp2.price and bar_index > ts_sp2.barIndex
+            ts_sp2.taken := true
+            if close > ts_sp2.price
+                me_pushSweep(me_SweepEvent.new(source = "TURTLESOUP", direction = "BULLISH_SWEEP", tf = timeframe.period, barIndex = bar_index, sweepExtreme = low, sweptLevel = ts_sp2.price, isMasterPrimary = false))
+
+// =============================================================================
 // TEMPORARY COMPILE SENTINEL — REMOVE/REPLACE DURING FIRST VISUAL MILESTONE
 // =============================================================================
-// TradingView requires every indicator() script to contain at least one
-// plot*(), barcolor(), bgcolor(), hline(), alertcondition(), or drawing call
-// (compiler error CE10246). Milestones 1-2 intentionally contain zero
-// plotting/drawing/signal logic (types and state scaffolding only), so this
-// requirement cannot be met by any real output without violating the
-// "do not add trading logic just to satisfy the compiler" instruction.
+// STILL REQUIRED at the end of Milestone 3: this milestone was scoped to
+// data adapters only (liquidity/sweep normalization into me_liquidityLog /
+// me_sweepLog) — no plotting, drawing, or signal output was introduced, per
+// the task's explicit "no visual system, no signal logic" instruction. The
+// sentinel below is therefore still the only satisfier of CE10246 and
+// remains unchanged from Milestone 1-2. It has zero effect on calculations,
+// source logic, Master Engine state, signals, alerts, backtesting, or
+// repaint behavior — see the original note preserved below.
 //
 // The line below is a NO-OP sentinel:
 //   - plots `na` (nothing is ever drawn — `na` never renders a point/line)
@@ -543,19 +1081,18 @@ grp_meContext = "Master Engine — 1W/1D Context (CONFIGURABLE RESEARCH MODULE)"
 //     computes nothing, and has no effect on calculations, signals, alerts,
 //     backtesting, or repaint behavior
 //
-// It exists ONLY to satisfy CE10246 during this scaffolding phase and MUST
-// be deleted (or replaced by real, milestone-appropriate output) the moment
-// the first genuine visual/signal element is introduced — per the plan,
-// that is expected no earlier than Milestone 4 (4H CRT primary engine) or
-// Milestone 14 (Debug Mode), whichever produces the first real draw call.
+// It MUST be deleted (or replaced by real, milestone-appropriate output) the
+// moment the first genuine visual/signal element is introduced — expected no
+// earlier than Milestone 4 (4H CRT primary engine, which introduces the CRT
+// candle panel / OB lines) or Milestone 14 (Debug Mode).
 plot(na, title = "TEMPORARY COMPILE SENTINEL — REMOVE/REPLACE DURING FIRST VISUAL MILESTONE", display = display.none)
 
 // =============================================================================
-// END OF MILESTONE 1 + 2
-// No plotting, alerting, or signal logic is executed yet beyond the inert
-// sentinel immediately above. This file is expected to compile with all
-// declarations above, but performs no meaningful chart drawing — this is
-// intentional for this milestone (verifies namespacing/type-collision
-// resolution in isolation before any detection logic is layered on top in
-// Milestone 3+).
+// END OF MILESTONE 1-3
+// Liquidity and Sweep adapters are now live for all four sources (CRT
+// primary; Unicorn, IFVG, Turtle Soup diagnostic). No CRT Model 1/2, no
+// CISD, no MSS, no Displacement, no POI, no SMT, no Regime, no Execution,
+// no Signal Engine, and no drawing/plotting exist yet beyond the inert
+// sentinel above — all deferred to their respective milestones per the
+// locked Implementation Order.
 // =============================================================================
